@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FBX Pool Game</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: sans-serif; }
+        #info {
+            position: absolute; top: 20px; left: 20px; color: white;
+            background: rgba(0,0,0,0.7); padding: 10px; border-radius: 5px;
+            pointer-events: none; z-index: 100;
+        }
+        #loading {
+            position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+            color: white; font-size: 24px; z-index: 200;
+        }
+    </style>
+</head>
+<body>
+    <div id="info">Click and drag to aim. Release to shoot.</div>
+    <div id="loading">Loading FBX Table...</div>
+
+    <!-- Import Maps for Three.js and Rapier -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+                "@dimforge/rapier3d-compat": "https://cdn.skypack.dev/@dimforge/rapier3d-compat@0.11.2"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
+        import RAPIER from '@dimforge/rapier3d-compat';
+
+        // --- 1. INITIALIZATION ---
+        await RAPIER.init();
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x111122);
+
+        const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+        camera.position.set(0, 2, 3); // Adjust based on your FBX table size
+
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        document.body.appendChild(renderer.domElement);
+
+        const controls = new OrbitControls(camera, renderer.domElement);
+        controls.enableDamping = true;
+        controls.target.set(0, 0, 0);
+
+        // Lighting
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+        scene.add(ambientLight);
+        const dirLight = new THREE.DirectionalLight(0xffffff, 0.8);
+        dirLight.position.set(5, 10, 5);
+        dirLight.castShadow = true;
+        scene.add(dirLight);
+
+        // --- 2. PHYSICS WORLD (RAPIER) ---
+        const world = new RAPIER.World({ x: 0, y: -9.81, z: 0 });
+        const eventQueue = new RAPIER.EventQueue(true);
+
+        // --- 3. LOAD YOUR FBX TABLE ---
+        // IMPORTANT: Place your .fbx file in the same folder as this index.html
+        const loader = new FBXLoader();
+        loader.load('./table.fbx', (fbx) => {
+            document.getElementById('loading').style.display = 'none';
+            
+            // Scale and position - YOU MUST ADJUST THESE VALUES
+            fbx.scale.set(0.01, 0.01, 0.01); // Typical FBX units are cm, Three.js is meters
+            fbx.position.set(0, 0, 0);
+            
+            fbx.traverse((child) => {
+                if (child.isMesh) {
+                    child.castShadow = true;
+                    child.receiveShadow = true;
+                }
+            });
+            
+            scene.add(fbx);
+            
+            // --- CRITICAL: Create INVISIBLE physics colliders for the table ---
+            // Do NOT use the visual mesh. Create simple boxes for the bed and cushions.
+            // You must adjust these numbers based on your FBX's dimensions.
+            createTableColliders();
+        }, undefined, (error) => {
+            console.error('Error loading FBX:', error);
+            document.getElementById('loading').innerText = 'Failed to load FBX. Check console.';
+        });
+
+        // --- 4. TABLE PHYSICS COLLIDERS (INVISIBLE) ---
+        function createTableColliders() {
+            // Example: A flat bed (adjust these dimensions for your table)
+            const bedWidth = 2.0;  // Adjust
+            const bedLength = 4.0; // Adjust
+            const bedThickness = 0.1;
+            
+            // Table Bed (Static)
+            const bedDesc = RAPIER.RigidBodyDesc.fixed().setTranslation(0, 0, 0);
+            const bedBody = world.createRigidBody(bedDesc);
+            const bedCollider = RAPIER.ColliderDesc.cuboid(bedWidth/2, bedThickness/2, bedLength/2);
+            world.createCollider(bedCollider, bedBody);
+
+            // Cushions (Simple boxes around the edge)
+            const cushionHeight = 0.15;
+            const cushionThickness = 0.1;
+            
+            // Top/Bottom cushions
+            for (let z of [-bedLength/2 - cushionThickness/2, bedLength/2 + cushionThickness/2]) {
+                const desc = RAPIER.RigidBodyDesc.fixed().setTranslation(0, bedThickness/2 + cushionHeight/2, z);
+                const body = world.createRigidBody(desc);
+                const collider = RAPIER.ColliderDesc.cuboid(bedWidth/2 + cushionThickness, cushionHeight/2, cushionThickness/2);
+                world.createCollider(collider, body);
+            }
+            
+            // Left/Right cushions
+            for (let x of [-bedWidth/2 - cushionThickness/2, bedWidth/2 + cushionThickness/2]) {
+                const desc = RAPIER.RigidBodyDesc.fixed().setTranslation(x, bedThickness/2 + cushionHeight/2, 0);
+                const body = world.createRigidBody(desc);
+                const collider = RAPIER.ColliderDesc.cuboid(cushionThickness/2, cushionHeight/2, bedLength/2);
+                world.createCollider(collider, body);
+            }
+        }
+
+        // --- 5. BALLS ---
+        const balls = [];
+        const ballRadius = 0.028; // Regulation pool ball is 57.2mm diameter
+
+        function createBall(position, color) {
+            // Visual
+            const geometry = new THREE.SphereGeometry(ballRadius, 32, 32);
+            const material = new THREE.MeshStandardMaterial({ color: color });
+            const mesh = new THREE.Mesh(geometry, material);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            scene.add(mesh);
+
+            // Physics
+            const bodyDesc = RAPIER.RigidBodyDesc.dynamic()
+                .setTranslation(position.x, position.y, position.z)
+                .setLinearDamping(0.5)   // Controls how quickly it stops
+                .setAngularDamping(0.8)
+                .setCcdEnabled(true);    // CRITICAL: Prevents balls tunneling through cushions at high speed
+            const body = world.createRigidBody(bodyDesc);
+            
+            const colliderDesc = RAPIER.ColliderDesc.ball(ballRadius)
+                .setRestitution(0.9)     // Bounciness
+                .setFriction(0.1);
+            world.createCollider(colliderDesc, body);
+
+            const ball = { mesh, body };
+            balls.push(ball);
+            return ball;
+        }
+
+        // Create cue ball (white)
+        const cueBall = createBall(new THREE.Vector3(0, 0.2, 1.5), 0xffffff);
+        
+        // Create a few object balls (colored)
+        createBall(new THREE.Vector3(0.2, 0.2, 0), 0xff0000);
+        createBall(new THREE.Vector3(-0.2, 0.2, 0), 0x0000ff);
+        createBall(new THREE.Vector3(0, 0.2, -1), 0x00ff00);
+
+        // --- 6. SHOOTING MECHANISM ---
+        let isAiming = false;
+        let aimStart = new THREE.Vector2();
+        let aimEnd = new THREE.Vector2();
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+
+        renderer.domElement.addEventListener('mousedown', (e) => {
+            if (isBallMoving()) return; // Don't allow shooting while balls are moving
+            
+            isAiming = true;
+            aimStart.set(e.clientX, e.clientY);
+            
+            // Calculate mouse position in normalized device coordinates
+            mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        });
+
+        renderer.domElement.addEventListener('mouseup', (e) => {
+            if (!isAiming) return;
+            isAiming = false;
+            
+            aimEnd.set(e.clientX, e.clientY);
+            
+            // Calculate direction based on drag vector
+            const dx = aimEnd.x - aimStart.x;
+            const dy = aimEnd.y - aimStart.y;
+            const length = Math.sqrt(dx*dx + dy*dy);
+            
+            if (length < 10) return; // Ignore tiny clicks
+            
+            // Map screen drag to 3D direction (simplified)
+            // This assumes camera is looking roughly down -Z
+            const impulseStrength = Math.min(length * 0.0005, 0.1);
+            const impulseX = (dx / length) * impulseStrength;
+            const impulseZ = (dy / length) * impulseStrength;
+            
+            // Apply impulse to cue ball
+            const cueBody = cueBall.body;
+            cueBody.applyImpulse({ x: impulseX, y: 0, z: impulseZ }, true);
+        });
+
+        function isBallMoving() {
+            for (const ball of balls) {
+                const vel = ball.body.linvel();
+                const speed = Math.sqrt(vel.x**2 + vel.y**2 + vel.z**2);
+                if (speed > 0.1) return true;
+            }
+            return false;
+        }
+
+        // --- 7. ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Step physics (fixed timestep is best)
+            world.step();
+
+            // Sync physics to visuals (ALWAYS physics -> visual, never reverse)
+            for (const ball of balls) {
+                const pos = ball.body.translation();
+                const rot = ball.body.rotation();
+                ball.mesh.position.set(pos.x, pos.y, pos.z);
+                ball.mesh.quaternion.set(rot.x, rot.y, rot.z, rot.w);
+            }
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        animate();
+
+        // Handle window resize
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
